@@ -1,6 +1,6 @@
 # 🧠 League of Legends Stats Tracker
 
-A full-stack web application that tracks and visualizes League of Legends player statistics by scraping data from a third-party website, storing it in a structured database, and displaying it on a modern frontend interface.
+A full-stack web application that tracks and visualizes League of Legends player statistics by scraping data from a third-party website, storing it in a structured database, and displaying it on a modern frontend interface.(In progress)
 
 ## 🔍 Project Overview
 
