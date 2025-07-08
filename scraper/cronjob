@@ -1,0 +1,1 @@
+0 3 * * * root python /scraper/data_scraper.py >> /var/log/cron.log 2>&1
