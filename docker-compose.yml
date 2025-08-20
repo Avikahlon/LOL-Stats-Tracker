@@ -1,0 +1,25 @@
+# version: '3.9'
+
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/back
+    depends_on:
+      - scraper
+    command: ["python", "back.py"]
+
+  scraper:
+    build: ./scraper
+    volumes:
+      - ./scraper:/data_scraper
+    command: ["python", "data_scraper.py"]
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
