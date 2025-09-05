@@ -2,7 +2,6 @@ import re
 from bs4 import BeautifulSoup
 import requests
 import pandas as pd
-from tests import validate_data
 
 def data_cleaner(value, dtype=str):
     if value is None:
@@ -110,7 +109,7 @@ def get_tournaments():
         "referer": "https://gol.gg/tournament/list/"
     }
 
-    seasons, = get_seasons()
+    seasons = get_seasons()
     raw_data = {}
 
     for season in seasons:
@@ -615,3 +614,9 @@ def extract_player_game_data(soup, match_id, game_number):
             })
 
     return players_data
+
+if __name__ == "__main__":
+    data = get_tournaments()
+    for season, tournaments in data.items():
+        print(f"Season: {season}, Tournaments: {len(tournaments)}")
+    
