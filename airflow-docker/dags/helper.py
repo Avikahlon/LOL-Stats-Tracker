@@ -2,6 +2,21 @@ import re
 from bs4 import BeautifulSoup
 import requests
 import pandas as pd
+import os
+import boto3
+import psycopg2
+import json
+from dotenv import load_dotenv
+
+load_dotenv()
+
+ENDPOINT = os.getenv('endpoint')
+PORT = int(os.getenv('port', 5432))
+USER = os.getenv('user')
+PASSWORD = os.getenv('password')
+DBNAME = os.getenv('dbname')
+REGION = os.getenv('region')
+
 
 def data_cleaner(value, dtype=str):
     if value is None:
@@ -31,11 +46,17 @@ def data_cleaner(value, dtype=str):
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
 
+def format_time(seconds_str):
+    try:
+        seconds = int(seconds_str)
+        minutes = seconds // 60
+        secs = seconds % 60
+        return f"{minutes}:{secs:02d}"
+    except (ValueError, TypeError):
+        return None
+
 def clean_text(text):
     return re.sub(r"[^\w.\s]", "", text)
-
-def load_tournaments():
-    return
 
 def get_season_split_role_data():
     url = "https://gol.gg/players/list/season-S15/split-Spring/tournament-ALL/"
@@ -80,7 +101,7 @@ def get_season_split_role_data():
         "roles": roles
     }
 
-
+#helper func
 def get_seasons():
     season_page = requests.get("https://gol.gg/tournament/list/")
     soup = BeautifulSoup(season_page.text, "html.parser")
@@ -95,6 +116,47 @@ def get_seasons():
             seasons.append(season)
 
     return seasons
+
+#helper func
+def load_tournament_names():
+
+    try:
+        conn = psycopg2.connect(
+                                host=ENDPOINT, 
+                                port=PORT, 
+                                database=DBNAME, 
+                                user=USER, 
+                                password=PASSWORD
+                            )
+        cur = conn.cursor()
+        cur.execute("SELECT tournament_name FROM tournament_staging;")
+        rows = cur.fetchall()
+        tournaments = [row[0] for row in rows]
+        return tournaments
+
+    except Exception as e:
+        print("Database connection failed due to {}".format(e))
+        return []
+    
+#helper func
+def get_urls_from_db():
+    try:
+        conn = psycopg2.connect(
+                                host=ENDPOINT, 
+                                port=PORT, 
+                                database=DBNAME, 
+                                user=USER, 
+                                password=PASSWORD
+                            )
+        cur = conn.cursor()
+        cur.execute("SELECT game_url FROM match_staging;")
+        rows = cur.fetchall()
+        urls = [row[0] for row in rows]
+        return urls
+
+    except Exception as e:
+        print("Database connection failed due to {}".format(e))
+        return []
 
 #Gets all tournaments and their basic details
 #TODO: add Split
@@ -121,37 +183,6 @@ def get_tournaments():
 
     return raw_data
 
-    # seasons, = get_seasons()
-
-    # tournaments_list = []
-
-    # for season in seasons:
-    #     data = {
-    #         "season": season
-    #     }
-
-    #     response = requests.post(url, headers=headers, data=data)
-
-    #     if response.status_code != 200:
-    #         print(f"Failed for {season}: {response.status_code}")
-    #         continue
-        
-    #     tournaments = response.json()
-
-    #     for t in tournaments:
-    #         tournament = {
-    #             'name': data_cleaner(t.get('trname', '').strip(), str),
-    #             'region': data_cleaner(t.get('region', '').strip(), str),
-    #             'number_of_games': data_cleaner((t.get('nbgames', 0)), int),
-    #             'game_duration': data_cleaner((t.get('avgtime', '').strip()), int),
-    #             'first_game': data_cleaner(t.get('firstgame', '').strip(), str),
-    #             'last_game': data_cleaner(t.get('lastgame', '').strip(), str),
-    #             'season': data_cleaner(season, int),
-    #             'split':()
-    #         }
-    #         tournaments_list.append(tournament)
-
-    # return tournaments_list
 
 #this is stats for each split/season TODO: for each individual split in a season(DONE)
 # TODO: role base player data(rn no way of finding player role)
@@ -162,10 +193,12 @@ def get_players():
 
     all_players = []
 
-    for split in splits:
-        for i, season in enumerate(seasons):
-            if i <= 2:
-                continue
+    headers_list = ["name", "link", "country", "games", "winrate", "kda", "avg_kills", "avg_deaths", "avg_assists", 
+                "csm", "gpm", "kp", "dmg_pct", "dpm", "vspm", "wpm", "wcpm", "vwpm", "gd15", "csd15", "xpd15", "fb_pct", 
+                "fb_victim_pct", "penta_kills", "solo_kills", "season", "split"]
+
+    for i, season in enumerate(seasons):
+        for split in splits:
 
             print(f"Fetching player stats for {season},{split} ...")
 
@@ -191,52 +224,39 @@ def get_players():
                 continue
 
             rows = table.find_all("tr")[1:]
-
+            
             for row in rows:
                 cols = row.find_all('td')
                 if len(cols) < 24:
                     continue
 
                 name_tag = cols[0].find('a')
-                player = {
-                    'name': data_cleaner(name_tag.text.strip() if name_tag else '', str),
-                    'link': data_cleaner(name_tag['href'].strip() if name_tag else '', str),
-                    'country': data_cleaner(cols[1].text.strip(), str),
-                    'games': data_cleaner(cols[2].text.strip(), int),
-                    'winrate': data_cleaner(cols[3].text.strip(" %"), float),
-                    'kda': data_cleaner(cols[4].text.strip(), float),
-                    'avg_kills': data_cleaner(cols[5].text.strip(), float),
-                    'avg_deaths': data_cleaner(cols[6].text.strip(), float),
-                    'avg_assists': data_cleaner(cols[7].text.strip(), float),
-                    'csm': data_cleaner(cols[8].text.strip(), float),
-                    'gpm': data_cleaner(cols[9].text.strip(), float),
-                    'kp': data_cleaner(cols[10].text.strip("%"), float),
-                    'dmg_pct': data_cleaner(cols[11].text.strip(), float),
-                    'dpm': data_cleaner(cols[12].text.strip(), float),
-                    'vspm': data_cleaner(cols[13].text.strip(), float),
-                    'wpm': data_cleaner(cols[14].text.strip(), float),
-                    'wcpm': data_cleaner(cols[15].text.strip(), float),
-                    'vwpm': data_cleaner(cols[16].text.strip(), float),
-                    'gd15': data_cleaner(cols[17].text.strip(), float),
-                    'csd15': data_cleaner(cols[18].text.strip(), float),
-                    'xpd15': data_cleaner(cols[19].text.strip(), float),
-                    'fb_pct': data_cleaner(cols[20].text.strip(" %"), float),
-                    'fb_victim_pct': data_cleaner(cols[21].text.strip(" %"), float),
-                    'penta_kills': data_cleaner(cols[22].text.strip(), int),
-                    'solo_kills': data_cleaner(cols[23].text.strip(), int),
-                    'season': data_cleaner(season, str),
-                    'split': data_cleaner(split, str)
-                }
+                name = name_tag.text.strip()
+                link = name_tag['href']
 
-                all_players.append(player)
+                country = cols[1].find("span").text.strip() if cols[1].find("span") else cols[1].get_text(strip=True)
+
+                values = [name, link, country] + [c.get_text(strip=True) for c in cols[2:24]] + [season, split]
+
+                player_dict = dict(zip(headers_list, values))
+                all_players.append(player_dict)
+        
+    all_players = json.dumps(all_players, indent=4)        
 
     return all_players
+
 
 def get_teams():
     seasons = get_seasons()
     splits = ["All", "Pre-Season","Winter", "Spring"]
 
     all_teams = []
+
+    headers_list = ["name", "region", "games", "winrate", "k:d", "GPM", "GDM", "gameDuration", "killsPerGame", 
+                "deathsPerGame", "towersKilled", "towersLost", "FBpercent", "FTpercent", "FOSpercent", 
+                "dragsPerGame", "dragPercent", "vgPerGame", "heraldPercent", "atakPercent", "avgDrags15", "TDat15", 
+                "GDat15", "platesPerGame", "baronPergame", "baronPercent", "cspm", "dpm",
+                "wpm", "visionWardsPM", "wardsClearedPM", "season", "split"] 
 
     for split in splits:
         for i, season in enumerate(seasons):
@@ -274,44 +294,14 @@ def get_teams():
                     continue
 
                 name_tag = cols[0].find('a')
-                team = {
-                    'name': name_tag.text.strip() if name_tag else '',
-                    'season': cols[1].text.strip(),
-                    'region': cols[2].text.strip(),
-                    'games': int(cols[3].text.strip()),
-                    'win-rate': float(cols[4].text.strip(" %")),
-                    'k:d': float(cols[5].text.strip()),
-                    'GPM': int(cols[6].text.strip()),
-                    'GDM': int(cols[7].text.strip()),
-                    'gameDuration': int(cols[8].text.strip().replace(':', '')),
-                    'killsPerGame': float(cols[9].text.strip()),
-                    'deathsPerGame': float(cols[10].text.strip()),
-                    'towersKilled': float(cols[11].text.strip()),
-                    'towersLost': float(cols[12].text.strip()),
-                    'FBpercent': float(cols[13].text.strip(" %")),
-                    'FTpercent': float(cols[14].text.strip(" %")),
-                    'FOSpercent': float(cols[15].text.strip().replace("%", "").replace("-","0")),
-                    'dragsPerGame': float(cols[16].text.strip(" %")),
-                    'dragPercent': float(cols[17].text.strip(" %")),
-                    'vgPerGame': float(cols[18].text.strip()),
-                    'heraldPercent': float(cols[19].text.strip(" %")),
-                    'atakPercent': float(cols[20].text.strip(" %")),
-                    'avgDrags15': float(cols[21].text.strip()),
-                    'TDat15': float(cols[22].text.strip()),
-                    'GDat15': float(cols[23].text.strip()),
-                    'platesPerGame': float(cols[24].text.strip()),
-                    'baronPergame': float(cols[25].text.strip()),
-                    'baronPercent': float(cols[26].text.strip(" %")),
-                    'cspm': float(cols[27].text.strip()),
-                    'dpm': float(cols[28].text.strip()),
-                    'wpm': float(cols[29].text.strip()),
-                    'visionWardsPM': float(cols[30].text.strip()),
-                    'wardsClearedPM': float(cols[31].text.strip()),
-                    'season': season,
-                    'split': split
-                }
+                name = name_tag.text.strip()
 
-                all_teams.append(team)
+                values = [name] + [c.get_text(strip=True) for c in cols[2:32]] + [season, split]
+
+                team_dict = dict(zip(headers_list, values))
+                all_teams.append(team_dict)
+        
+    all_teams = json.dumps(all_teams, indent=4)
 
     return all_teams
 
@@ -346,11 +336,11 @@ def get_bo_(url):
         print(f"Error fetching BO from summary: {e}")
         return None
 
+# TODO: change output to json
 def get_matches():
 
-    # tournaments = load_tournament_names()
-    tournaments = ["EMEA Masters 2025 Winter"]
-
+    tournaments = load_tournament_names()
+    tournaments = tournaments[:2]
     matches = []
 
     for tournament in tournaments:
@@ -384,7 +374,8 @@ def get_matches():
                 continue
 
             link_tag = cols[0].find('a')
-            match_url = link_tag['href'].strip()
+            match_url = link_tag['href'].strip().replace("page-game", "page-summary") \
+                if "page-game" in link_tag['href'] else link_tag['href'].strip()
             match_name = link_tag.text.strip()
             bo = get_bo_(match_url)
 
@@ -407,6 +398,8 @@ def get_matches():
             else:
                 winner = loser = None
 
+            game_urls = get_game_url(match_url, score)
+
             match = {
                 'match_name': match_name,
                 'tournament': tournament,
@@ -419,18 +412,15 @@ def get_matches():
                 'match_type': match_type,
                 'patch': patch,
                 'date': match_date,
-                'BO': bo
+                'BO': bo,
+                'game_urls': game_urls
             }
 
             matches.append(match)
     return matches
 
+#gets urls for each game in a match series
 def get_game_url(match_url=None, score=None):
-
-    match_url = ""
-
-    match_url = "/game/stats/65055/page-summary/"
-    score = "3 - 0"
 
     match = re.search(r'/game/stats/(\d+)/page-summary/', match_url)
     if not match:
@@ -452,7 +442,8 @@ def get_game_url(match_url=None, score=None):
 
         return game_urls
 
-def get_game(games):
+#TODO: fetch game_urls from db
+def get_game(game_url):
 
     headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
@@ -460,10 +451,11 @@ def get_game(games):
             "Accept-Language": "en-US,en;q=0.9",
     }
 
-    for index, game in enumerate(games):
+    for index, game in enumerate(game_url):
 
-        match_id= index+10
-    for game in games:
+        match_id = index+10
+
+    for game in game_url:
 
         response = requests.get(game, headers=headers)
 
@@ -473,13 +465,13 @@ def get_game(games):
 
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        game_data = extract_team_game_data(soup)
-        player_data = extract_player_game_data(soup, match_id, index)
+        game_data = extract_team_game_data(soup, game)
+        player_data = extract_player_game_data(soup, game, index)
 
         return (game_data , player_data)
 
-#gets data for 1 game froma series of matches
-def extract_team_game_data(soup):
+#gets data for 1 game from a series of matches
+def extract_team_game_data(soup, game_url):
     game_data = []
 
     teams = soup.select("div.row.rowbreak > div.col-12.col-sm-6")  # One for each side
@@ -554,13 +546,14 @@ def extract_team_game_data(soup):
             "first_tower": first_tower,
             "dragon_types": dragon_types,
             "bans": bans,
-            "picks": picks
+            "picks": picks,
+            "game_url": game_url
         })
 
     return game_data
 
 #gets players data from 1 game from a series
-def extract_player_game_data(soup, match_id, game_number):
+def extract_player_game_data(soup, game_url, game_number):
     players_data = []
 
     tables = soup.find_all("table", class_="playersInfosLine")
@@ -601,9 +594,8 @@ def extract_player_game_data(soup, match_id, game_number):
                 cs = 0
 
             players_data.append({
-                "match_id": match_id,
+                "game_url": game_url,
                 "game_number": game_number,
-                "player_id": player_id,
                 "player_name": player_name,
                 "team_side": side,
                 "champion": champion,
@@ -613,10 +605,7 @@ def extract_player_game_data(soup, match_id, game_number):
                 "cs": cs
             })
 
-    return players_data
+    return players_data  
 
 if __name__ == "__main__":
-    data = get_tournaments()
-    for season, tournaments in data.items():
-        print(f"Season: {season}, Tournaments: {len(tournaments)}")
-    
+    get_matches()

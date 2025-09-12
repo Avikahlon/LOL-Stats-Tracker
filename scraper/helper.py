@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import requests
 import pandas as pd
 from tests import validate_data
+import json
 
 def data_cleaner(value, dtype=str):
     if value is None:
@@ -110,7 +111,7 @@ def get_tournaments():
         "referer": "https://gol.gg/tournament/list/"
     }
 
-    seasons, = get_seasons()
+    seasons = get_seasons()
     raw_data = {}
 
     for season in seasons:
@@ -615,3 +616,24 @@ def extract_player_game_data(soup, match_id, game_number):
             })
 
     return players_data
+
+if __name__ == "__main__":
+    tournaments = get_tournaments()
+    with open('output.json', 'w') as f:
+        json.dump(tournaments, f, indent=4)
+
+    # players = get_players()
+    # print(players)
+
+    # teams = get_teams()
+    # print(teams)
+
+    # matches = get_matches()
+    # print(matches)
+
+    # game_urls = get_game_url()
+    # print(game_urls)
+
+    # game_data, player_data = get_game(game_urls)
+    # print(game_data)
+    # print(player_data)
