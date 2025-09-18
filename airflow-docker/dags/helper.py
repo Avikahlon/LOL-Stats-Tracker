@@ -7,6 +7,13 @@ import boto3
 import psycopg2
 import json
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+import aiohttp
+import asyncio
+from httpx import AsyncClient
+from selectolax.lexbor import LexborHTMLParser
+from selectolax.parser import HTMLParser
 
 load_dotenv()
 
@@ -22,16 +29,19 @@ def data_cleaner(value, dtype=str):
     if value is None:
         return None
 
-    value = value.strip()  # remove spaces
-    if value in ("-", ""):
-        return None
-
-    if ":" in value and dtype in (int, float):
-        try:
-            minutes, seconds = value.split(":")
-            value = f"{minutes}{seconds}"
-        except ValueError:
+    # Convert to string only if working with text
+    if isinstance(value, str):
+        value = value.strip()
+        if value in ("-", ""):
             return None
+
+        # Handle mm:ss format if expecting numeric
+        if ":" in value and dtype in (int, float):
+            try:
+                minutes, seconds = value.split(":")
+                value = f"{minutes}{seconds}"
+            except ValueError:
+                return None
 
     try:
         if dtype == int:
@@ -39,9 +49,20 @@ def data_cleaner(value, dtype=str):
         elif dtype == float:
             return float(value)
         else:
-            return value
-    except ValueError:
+            return str(value).strip() if isinstance(value, str) else value
+    except (ValueError, TypeError):
         return None
+
+def parse_score(score_str):
+    if not score_str:
+        return 0, 0
+    parts = [p.strip() for p in score_str.split("-")]
+    try:
+        team1 = int(parts[0]) if parts[0] else 0
+        team2 = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+        return team1, team2
+    except (ValueError, IndexError):
+        return 0, 0
 
 def sanitize_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "_", name)
@@ -149,9 +170,22 @@ def get_urls_from_db():
                                 password=PASSWORD
                             )
         cur = conn.cursor()
-        cur.execute("SELECT game_url FROM match_staging;")
+        cur.execute("SELECT game_urls FROM matches_staging;")
         rows = cur.fetchall()
-        urls = [row[0] for row in rows]
+        urls = []
+        for row in rows:
+            value = row[0]
+            if isinstance(value, str):
+                try:
+                    parsed = json.loads(value)
+                    urls.extend(parsed) 
+                except json.JSONDecodeError:
+                    urls.append(value)
+            elif isinstance(value, list):
+                urls.extend(value)
+            else:
+                urls.append(str(value))
+
         return urls
 
     except Exception as e:
@@ -184,7 +218,10 @@ def get_tournaments():
     return raw_data
 
 
-#this is stats for each split/season TODO: for each individual split in a season(DONE)
+"""PLAYERS"""
+
+#this is stats for each split/season 
+# TODO: for each individual split in a season(DONE)
 # TODO: role base player data(rn no way of finding player role)
 def get_players():
     data = get_season_split_role_data()
@@ -197,7 +234,7 @@ def get_players():
                 "csm", "gpm", "kp", "dmg_pct", "dpm", "vspm", "wpm", "wcpm", "vwpm", "gd15", "csd15", "xpd15", "fb_pct", 
                 "fb_victim_pct", "penta_kills", "solo_kills", "season", "split"]
 
-    for i, season in enumerate(seasons):
+    for i, season in enumerate(seasons): 
         for split in splits:
 
             print(f"Fetching player stats for {season},{split} ...")
@@ -245,6 +282,7 @@ def get_players():
 
     return all_players
 
+"""TEAMS"""
 
 def get_teams():
     seasons = get_seasons()
@@ -305,193 +343,96 @@ def get_teams():
 
     return all_teams
 
-# gets the Best of info about a match series
-def get_bo_(url):
-    url = url.strip(".")
-    url = f"https://gol.gg{url}"
-    headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Referer": "https://gol.gg/game/stats/",
-            "Accept-Language": "en-US,en;q=0.9",
-        }
 
-    try:
-        resp = requests.get(url, headers=headers)
-        if resp.status_code != 200:
-            print(f"Failed to fetch match summary: {url}")
-            return None
+"""GAME DATA"""
 
-        soup = BeautifulSoup(resp.text, 'html.parser')
-
-        bo_div = soup.find("div", class_="col-4 col-sm-2 text-center")
-        if bo_div:
-            h1 = bo_div.find("h1")
-            if h1:
-                bo_text = h1.text.strip()
-                if bo_text.startswith("BO"):
-                    return int(bo_text[2:])
-
-        return None
-    except Exception as e:
-        print(f"Error fetching BO from summary: {e}")
-        return None
-
-# TODO: change output to json
-def get_matches():
-
-    tournaments = load_tournament_names()
-    tournaments = tournaments[:2]
-    matches = []
-
-    for tournament in tournaments:
-
-        url = f"https://gol.gg/tournament/tournament-matchlist/{tournament}/"
-
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Referer": "https://gol.gg/tournament-matchlist/",
-            "Accept-Language": "en-US,en;q=0.9",
-        }    
-
-        response = requests.get(url, headers=headers)
-
-        if response.status_code != 200:
-            print(f"Failed for {tournament}: {response.status_code}")
-            continue
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        table = soup.find("table", class_="table_list")
-
-        if not table:
-            print(f"No matches table found for {tournament}")
-            continue
-
-        rows = table.find_all("tr")[1:]
-
-        for row in rows:
-            cols = row.find_all('td')
-            if not cols or len(cols) < 7:
-                continue
-
-            link_tag = cols[0].find('a')
-            match_url = link_tag['href'].strip().replace("page-game", "page-summary") \
-                if "page-game" in link_tag['href'] else link_tag['href'].strip()
-            match_name = link_tag.text.strip()
-            bo = get_bo_(match_url)
-
-            team1_name = cols[1].text.strip()
-            score = cols[2].text.strip()
-            team2_name = cols[3].text.strip()
-            match_type = cols[4].text.strip()
-            patch = cols[5].text.strip()
-            match_date = cols[6].text.strip()
-
-            team1_class = cols[1].get('class', [])
-            team2_class = cols[3].get('class', [])
-
-            if 'text_victory' in team1_class:
-                winner = team1_name
-                loser = team2_name
-            elif 'text_victory' in team2_class:
-                winner = team2_name
-                loser = team1_name
-            else:
-                winner = loser = None
-
-            game_urls = get_game_url(match_url, score)
-
-            match = {
-                'match_name': match_name,
-                'tournament': tournament,
-                'match_url': match_url,
-                'team1': team1_name,
-                'team2': team2_name,
-                'winner': winner,
-                'loser': loser,
-                'score': score,
-                'match_type': match_type,
-                'patch': patch,
-                'date': match_date,
-                'BO': bo,
-                'game_urls': game_urls
-            }
-
-            matches.append(match)
-    return matches
-
-#gets urls for each game in a match series
-def get_game_url(match_url=None, score=None):
-
-    match = re.search(r'/game/stats/(\d+)/page-summary/', match_url)
-    if not match:
-        print("Invalid match URL format.")
-    else:
-        base_game_id = int(match.group(1))
-
-        # Calculate number of games from score
+async def fetch_game(session, url, semaphore, headers):
+    async with semaphore:
         try:
-            score_parts = [int(s.strip()) for s in score.split('-')]
-            total_games = sum(score_parts)
-        except:
-            total_games = 1
+            async with session.get(url, headers=headers, timeout=15) as resp:
+                resp.raise_for_status()
+                html = await resp.text()
+                return url, html
+        except Exception as e:
+            print(f"Failed for {url}: {e}")
+            return url, None
 
-        game_urls = [
-            f"https://gol.gg/game/stats/{base_game_id + i}/page-game/"
-            for i in range(total_games)
-        ]
+def split_batches(lst, batch_size):
+    """Split a list into chunks."""
+    for i in range(0, len(lst), batch_size):
+        yield lst[i:i + batch_size]
 
-        return game_urls
+async def process_batch(session, batch, headers, semaphore):
+    tasks = [fetch_game(session, url, semaphore, headers) for url in batch]
+    results = await asyncio.gather(*tasks)
+    
+    all_games_data = []
+    all_players_data = []
 
-#TODO: fetch game_urls from db
-def get_game(game_url):
+    for index, (url, html) in enumerate(results):
+        if not html:
+            continue
 
+        tree = HTMLParser(html)
+
+        game_data = extract_team_game_data(tree, url)
+        player_data = extract_player_game_data(tree, url, index)
+
+        all_games_data.extend(game_data)
+        all_players_data.extend(player_data)
+
+    return all_games_data, all_players_data
+
+async def get_game(game_urls, BATCH_SIZE=500, MAX_CONCURRENT=50):
     headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Referer": "https://gol.gg/game/stats/",
-            "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://gol.gg/game/stats/",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
-    for index, game in enumerate(game_url):
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT)
+    all_games_data = []
+    all_players_data = []
 
-        match_id = index+10
+    start_time = time.time()
 
-    for game in game_url:
+    batches = list(split_batches(game_urls, BATCH_SIZE))
+    async with aiohttp.ClientSession() as session:
+        for i, batch in enumerate(batches, 1):
+            print(f"Processing batch {i}/{len(batches)}...")
+            batch_start = time.time()
+            games_data, players_data = await process_batch(session, batch, headers, semaphore)
+            all_games_data.extend(games_data)
+            all_players_data.extend(players_data)
+            print(f"Batch {i} done in {time.time() - batch_start:.2f} seconds")
+            predicted_total = (time.time() - start_time) / i * len(batches)
+            print(f"Predicted total time: {predicted_total:.2f} seconds")
+    
+    print(f"Total time: {time.time() - start_time:.2f} seconds")
 
-        response = requests.get(game, headers=headers)
+    return all_games_data, all_players_data
+    
 
-        if response.status_code != 200:
-            print(f"Failed for {game}: {response.status_code}")
-            continue
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        game_data = extract_team_game_data(soup, game)
-        player_data = extract_player_game_data(soup, game, index)
-
-        return (game_data , player_data)
-
-#gets data for 1 game from a series of matches
-def extract_team_game_data(soup, game_url):
+def extract_team_game_data(tree: HTMLParser, game_url: str):
     game_data = []
 
-    teams = soup.select("div.row.rowbreak > div.col-12.col-sm-6")  # One for each side
-
+    teams = tree.css("div.row.rowbreak > div.col-12.col-sm-6")
     for side in teams:
-        header = side.find("div", class_="blue-line-header") or side.find("div", class_="red-line-header")
+        header = side.css_first("div.blue-line-header") or side.css_first("div.red-line-header")
         if not header:
             continue
 
-        team_name = header.find("a").text.strip()
-        result = "WIN" if "WIN" in header.text else "LOSS"
+        team_name = header.css_first("a").text(strip=True)
+        result = "WIN" if "WIN" in header.text() else "LOSS"
+        print(f"Processing {team_name} - {result}")
 
-        # Basic stats: kills, towers, dragons, barons, gold
-        stats_row = side.select_one("div.row[style*='min-height']")
-        stats = stats_row.find_all("span", class_="score-box")
-        
+        stats_row = side.css_first("div.row[style*='min-height']")
+        stats = stats_row.css("span.score-box") if stats_row else []
+
         kills = towers = dragons = barons = gold = None
         for span in stats:
-            alt_text = span.find("img")["alt"]
-            val = span.text.strip().split()[-1]
+            alt_text = span.css_first("img").attributes.get("alt", "")
+            val = span.text(strip=True).split()[-1]
 
             if "Kills" in alt_text:
                 kills = int(val)
@@ -504,35 +445,28 @@ def extract_team_game_data(soup, game_url):
             elif "Gold" in alt_text:
                 gold = val
 
-        # First Blood / First Tower (check <img alt="First Blood"> or <img alt="First Tower">)
-        firsts = stats_row.find_all("img", class_="champion_icon_Xlight")
-        first_blood = any("Blood" in img["alt"] for img in firsts)
-        first_tower = any("Tower" in img["alt"] for img in firsts)
+        firsts = stats_row.css("img.champion_icon_Xlight") if stats_row else []
+        first_blood = any("Blood" in img.attrs.get("alt", "") for img in firsts)
+        first_tower = any("Tower" in img.attrs.get("alt", "") for img in firsts)
 
-        # Dragons types
-        dragon_imgs = stats_row.find_all("img", class_="champion_icon_XS")
-        dragon_types = [img["alt"] for img in dragon_imgs]
+        dragon_imgs = stats_row.css("img.champion_icon_XS") if stats_row else []
+        dragon_types = [img.attrs.get("alt") for img in dragon_imgs]
 
-        rows = side.find_all("div", class_="row")
-        # Bans
-        bans = []
-        # Picks
-        picks = []
+        rows = side.css("div.row")
+        bans, picks = [], []
 
         for row in rows:
-            label = row.find("div", class_="col-2")
+            label = row.css_first("div.col-2")
             if not label:
                 continue
 
-            label_text = label.text.strip()
-
+            label_text = label.text(strip=True)
             if label_text == "Bans":
-                ban_imgs = row.find("div", class_="col-10").find_all("img")
-                bans = [img["alt"].strip() for img in ban_imgs if "alt" in img.attrs]
-
+                ban_imgs = row.css("div.col-10 img")
+                bans = [img.attrs.get("alt", "").strip() for img in ban_imgs]
             elif label_text == "Picks":
-                pick_imgs = row.find("div", class_="col-10").find_all("img")
-                picks = [img["alt"].strip() for img in pick_imgs if "alt" in img.attrs]
+                pick_imgs = row.css("div.col-10 img")
+                picks = [img.attrs.get("alt", "").strip() for img in pick_imgs]
 
         game_data.append({
             "team": team_name,
@@ -552,42 +486,37 @@ def extract_team_game_data(soup, game_url):
 
     return game_data
 
-#gets players data from 1 game from a series
-def extract_player_game_data(soup, game_url, game_number):
+def extract_player_game_data(tree: HTMLParser, game_url: str, game_number: int):
     players_data = []
 
-    tables = soup.find_all("table", class_="playersInfosLine")
-    
+    tables = tree.css("table.playersInfosLine")
     if not tables or len(tables) < 2:
         return players_data
 
-    for side, table in zip(['blue', 'red'], tables):  # assumes 2 tables: one for each team
-        rows = table.find_all("tr")
-        
+    for side, table in zip(["blue", "red"], tables):
+        rows = table.css("tr")
+
         for row in rows:
-            cols = row.find_all("td")
+            cols = row.css("td")
             if len(cols) < 4:
                 continue
-            
-            table = soup.find("div", class_="row break")
 
-            # First column: champion and player
-            champ_tag = cols[0].select_one("a[href*='champion-stats']")
-            player_tag = cols[0].select_one("a[href*='player-stats']")
-            champion = champ_tag["title"].replace(" stats", "") if champ_tag else None
-            player_name = player_tag.text.strip() if player_tag else None
-            player_url = player_tag["href"] if player_tag else ""
+            champ_tag = cols[0].css_first("a[href*='champion-stats']")
+            player_tag = cols[0].css_first("a[href*='player-stats']")
+
+            champion = champ_tag.attrs.get("title", "").replace(" stats", "") if champ_tag else None
+            player_name = player_tag.text(strip=True) if player_tag else None
+            player_url = player_tag.attrs.get("href", "") if player_tag else ""
             player_id = player_url.strip("/").split("/")[2] if player_url else None
+            print(f"Processing player: {player_name} ({champion})")
 
-            # KDA is in the second-last column
-            kda_text = cols[-2].text.strip()
+            kda_text = cols[-2].text(strip=True)
             try:
-                kills, deaths, assists = map(int, kda_text.split('/'))
+                kills, deaths, assists = map(int, kda_text.split("/"))
             except ValueError:
-                kills = deaths = assists = 0  # fallback
+                kills = deaths = assists = 0
 
-            # CS is in the last column
-            cs_text = cols[-1].text.strip()
+            cs_text = cols[-1].text(strip=True)
             try:
                 cs = int(cs_text.split()[0])
             except (ValueError, IndexError):
@@ -605,7 +534,156 @@ def extract_player_game_data(soup, game_url, game_number):
                 "cs": cs
             })
 
-    return players_data  
+    return players_data
 
-if __name__ == "__main__":
-    get_matches()
+"""MATCHES"""
+
+async def fetch(session, url, semaphore, headers=None):
+    async with semaphore:
+        try:
+            async with session.get(url, headers=headers, timeout=30) as response:
+                if response.status != 200:
+                    print(f"Failed {url}: {response.status}")
+                    return None
+                return await response.text()
+        except Exception as e:
+            print(f"Error fetching {url}: {e}")
+            return None
+
+
+def get_bo_(score):
+    if not score or "-" not in score:
+        return None
+    try:
+        parts = [int(s.strip()) for s in score.split("-")]
+        return max(parts) * 2 - 1  # e.g. 2-1 → BO3, 3-2 → BO5
+    except ValueError:
+        return None
+
+
+async def get_game_url(match_url, score):
+    match = re.search(r'/game/stats/(\d+)/page-summary/', match_url)
+    if not match:
+        return []
+    base_game_id = int(match.group(1))
+
+    try:
+        score_parts = [int(s.strip()) for s in score.split('-')]
+        total_games = sum(score_parts)
+    except:
+        total_games = 1
+
+    return [
+        f"https://gol.gg/game/stats/{base_game_id + i}/page-game/"
+        for i in range(total_games)
+    ]
+
+
+async def fetch_tournament_matches(session, tournament, semaphore):
+    url = f"https://gol.gg/tournament/tournament-matchlist/{tournament}/"
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://gol.gg/tournament-matchlist/",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    html = await fetch(session, url, semaphore, headers)
+    if not html:
+        return []
+
+    tree = LexborHTMLParser(html)
+    table = tree.css_first("table.table_list")
+    if not table:
+        print(f"No matches table found for {tournament}")
+        return []
+
+    matches = []
+    rows = table.css("tr")[1:]  # skip header row
+
+    for row in rows:
+        cols = row.css("td")
+        if len(cols) < 7:
+            continue
+
+        link_tag = cols[0].css_first("a")
+        if not link_tag:
+            continue
+
+        match_url = link_tag.attributes.get("href", "").strip().replace("page-game", "page-summary")
+        match_name = link_tag.text().strip()
+
+        team1_name = cols[1].text().strip()
+        score = cols[2].text().strip()
+        team2_name = cols[3].text().strip()
+        match_type = cols[4].text().strip()
+        patch = cols[5].text().strip()
+        match_date = cols[6].text().strip()
+
+        team1_class = cols[1].attributes.get("class", "")
+        team2_class = cols[3].attributes.get("class", "")
+
+        if "text_victory" in team1_class:
+            winner, loser = team1_name, team2_name
+        elif "text_victory" in team2_class:
+            winner, loser = team2_name, team1_name
+        else:
+            winner = loser = None
+
+        # Run sub-tasks concurrently
+        bo = get_bo_(score)
+        game_urls_task = get_game_url(match_url, score)
+
+        game_urls = await asyncio.gather(game_urls_task)
+
+        matches.append({
+            "match_name": match_name,
+            "tournament": tournament,
+            "match_url": match_url,
+            "team1": team1_name,
+            "team2": team2_name,
+            "winner": winner,
+            "loser": loser,
+            "score": score,
+            "match_type": match_type,
+            "patch": patch,
+            "date": match_date,
+            "BO": bo,
+            "game_urls": game_urls,
+        })
+
+    return matches
+
+
+async def get_matches_async(tournaments, max_concurrent=20):
+    semaphore = asyncio.Semaphore(max_concurrent)
+    results = []
+    start = time.time()
+
+    async with aiohttp.ClientSession() as session:
+        tasks = [fetch_tournament_matches(session, t, semaphore) for t in tournaments]
+        tournaments_results = await asyncio.gather(*tasks)
+
+        for tournament, matches in zip(tournaments, tournaments_results):
+            print(f"{tournament}: {len(matches)} matches")
+            results.extend(matches)
+
+    print(f"Finished in {time.time() - start:.2f}s")
+    results = json.dumps(results, indent=4) 
+    return results
+
+# if __name__ == "__main__":
+    # print(get_game({"https://gol.gg/game/stats/323/page-game/"}))\\
+
+    # tournaments = load_tournament_names()
+    # results = asyncio.run(get_matches_async(tournaments, max_concurrent=30))
+
+    # with open("matches_async.json", "w", encoding="utf-8") as f:
+    #     json.dump(results, f, indent=4)
+
+    # game_urls = get_urls_from_db()
+    # games, players = asyncio.run(get_game(game_urls))
+    # with open("games.json", "w", encoding="utf-8") as f:
+    #     f.write(games)
+    # with open("players.json", "w", encoding="utf-8") as f:
+    #     f.write(players)
+    

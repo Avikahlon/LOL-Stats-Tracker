@@ -148,7 +148,7 @@ def transform_data(**kwargs):
     for p in players_list]
 
     query = """
-            INSERT INTO players (
+            INSERT INTO players_staging (
                 name, link, country, games, winrate, kda,
                 avg_kills, avg_deaths, avg_assists, csm, gpm, kp,
                 dmg_pct, dpm, vspm, wpm, wcpm, vwpm,
