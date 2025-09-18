@@ -19,6 +19,7 @@ Due to limitations in publicly available APIs for Competitive League of Legends 
 
 ### Backend
 - Python (BeautifulSoup, Requests, FastAPI and Flask)
+- Airflow
 - PostgreSQL
 
 ### Frontend
@@ -28,7 +29,7 @@ Due to limitations in publicly available APIs for Competitive League of Legends 
 ### Dev Tools
 - Git + GitHub
 - Docker
-- VS Code
+- AWS
 
 ## 📁 Project Structure
 
