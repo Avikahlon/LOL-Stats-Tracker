@@ -31,6 +31,7 @@ Due to the lack of direct access to competitive League of Legends datasets, this
 
 ### Data Visualization
 - **Power BI:** For building interactive reports, DAX modeling, and visual storytelling.
+- [Home Page]("images/Home.png")
 
 ### Dev Tools
 - **Git + GitHub:** Version control.
